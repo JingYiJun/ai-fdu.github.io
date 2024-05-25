@@ -7,6 +7,7 @@ import time
 import random
 import numpy as np
 from torch.utils.data import Dataset, DataLoader, random_split
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from PIL import Image
 import h5py
 import cv2
@@ -18,8 +19,7 @@ def save_checkpoint(state, is_best, task_id, filename='checkpoint.pth.tar', save
     checkpoint_path = os.path.join(save_dir, task_id + filename)
     torch.save(state, checkpoint_path)
     if is_best:
-        best_model_path = os.path.join(
-            save_dir, task_id + 'model_best.pth.tar')
+        best_model_path = os.path.join(save_dir, task_id + 'model_best.pth.tar')
         shutil.copyfile(checkpoint_path, best_model_path)
 
 
@@ -65,12 +65,12 @@ class ImgDataset(Dataset):
         return img, target
 
 
-lr = 1e-7
+lr = 1e-5
 original_lr = lr
 batch_size = 1
-momentum = 0.95
+# momentum = 0.95
 decay = 5*1e-4
-epochs = 400
+num_epochs = 400
 steps = [-1, 1, 100, 150]
 scales = [1, 1, 1, 1]
 workers = 4
@@ -78,7 +78,7 @@ seed = time.time()
 print_freq = 30
 img_dir = "./dataset/train/rgb/"
 gt_dir = "./dataset/train/hdf5s/"
-pre = None
+pre = "./model/model_best.pth.tar"
 task = ""
 
 
@@ -92,53 +92,47 @@ def main():
 
     model = model.cuda()
 
-    criterion = nn.MSELoss(size_average=False).cuda()
+    criterion = nn.MSELoss(reduction="sum").cuda()
 
-    optimizer = torch.optim.SGD(model.parameters(), lr,
-                                momentum=momentum,
-                                weight_decay=decay)
+    optimizer = torch.optim.AdamW(model.parameters(), lr, weight_decay=decay)
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
+    scheduler = ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5, verbose=False, min_lr=1e-7)
     transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
-                             0.229, 0.224, 0.225]),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
-    dataset = ImgDataset(
-        img_dir,
-        gt_dir, transform=transform, train=True)
+    dataset = ImgDataset(img_dir, gt_dir, transform=transform, train=True)
 
     train_size = int(0.8 * len(dataset))
     val_size = len(dataset) - train_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
-    train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, num_workers=workers)
-    val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False, num_workers=workers)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=workers)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=workers)
 
     if pre:
         if os.path.isfile(pre):
-            print("=> loading checkpoint '{}'".format(pre))
+            print(f"=> loading checkpoint '{pre}'", flush=True)
             checkpoint = torch.load(pre)
             start_epoch = checkpoint['epoch']
             best_prec1 = checkpoint['best_prec1']
             model.load_state_dict(checkpoint['state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer'])
-            print("=> loaded checkpoint '{}' (epoch {})"
-                  .format(pre, checkpoint['epoch']))
+            print(f"=> loaded checkpoint '{pre}' (start_epoch {start_epoch})", flush=True)
         else:
-            print("=> no checkpoint found at '{}'".format(pre))
+            print(f"=> no checkpoint found at '{pre}'", flush=True)
 
-    for epoch in range(start_epoch, epochs):
+    for epoch in range(start_epoch, num_epochs):
 
-        adjust_learning_rate(optimizer, epoch)
+        # adjust_learning_rate(optimizer, epoch)
 
         train(model, criterion, optimizer, epoch, train_loader)
         prec1 = validate(model, val_loader)
+        scheduler.step(prec1)
 
         is_best = prec1 < best_prec1
         best_prec1 = min(prec1, best_prec1)
-        print(' * best MAE {mae:.3f} '
-              .format(mae=best_prec1))
+        print(f' * best MAE {best_prec1:.3f} ', flush=True)
         save_checkpoint({
             'epoch': epoch + 1,
             'arch': pre,
@@ -153,9 +147,9 @@ def train(model, criterion, optimizer, epoch, train_loader):
     losses = AverageMeter()
     batch_time = AverageMeter()
     data_time = AverageMeter()
+    current_lr = optimizer.param_groups[0]['lr']
 
-    print('epoch %d, processed %d samples, lr %.10f' %
-          (epoch, epoch * len(train_loader.dataset), lr))
+    print(f'epoch {epoch}, processed {epoch * len(train_loader.dataset)} samples, lr {current_lr}', flush=True)
 
     model.train()
     end = time.time()
@@ -179,17 +173,15 @@ def train(model, criterion, optimizer, epoch, train_loader):
         end = time.time()
 
         if i % print_freq == 0:
-            print('Epoch: [{0}][{1}/{2}]\t'
-                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                  'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
-                  'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                  .format(
-                      epoch, i, len(train_loader), batch_time=batch_time,
-                      data_time=data_time, loss=losses))
+            print(f'Epoch: [{epoch}][{i}/{len(train_loader)}]\t'
+                  f'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                  f'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
+                  f'Loss {losses.val:.4f} ({losses.avg:.4f})\t',
+                  flush=True)
 
 
 def validate(model, val_loader):
-    print('begin test')
+    print('begin test', flush=True)
 
     model.eval()
     mae = 0
@@ -203,8 +195,7 @@ def validate(model, val_loader):
                    target.sum().type(torch.FloatTensor).cuda())
 
     mae = mae/len(val_loader)
-    print(' * MAE {mae:.3f} '
-          .format(mae=mae))
+    print(f' * MAE {mae:.3f} ', flush=True)
 
     return mae
 
@@ -249,3 +240,5 @@ class AverageMeter(object):
 
 if __name__ == '__main__':
     main()
+
+# srun -p x090 --cpus-per-task=4 --mem-per-cpu=4G --gres=gpu:1 --job-name=python --nodes=1 --ntasks=1 --time=2:00:00 --output=train.log python train.py

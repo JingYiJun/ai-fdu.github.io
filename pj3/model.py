@@ -15,7 +15,7 @@ class CSRNet(nn.Module):
             self.backend_feat, in_channels=512, dilation=True)
         self.output_layer = nn.Conv2d(64, 1, kernel_size=1)
         if not load_weights:
-            mod = models.vgg16(pretrained=True)
+            mod = models.vgg16(weights=models.VGG16_Weights.DEFAULT)
             self._initialize_weights()
             for i, (key, value) in enumerate(list(self.frontend.state_dict().items())):
                 self.frontend.state_dict()[key].data[:] = list(
